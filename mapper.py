@@ -1,91 +1,456 @@
-#!/usr/bin/env python3
+# mapper.py
 # -*- coding: utf-8 -*-
 
-# example mapping program
-
-from collections import defaultdict
 import sys
-import numpy
-
-# DP algorithm adapted from Langmead's notebooks
-def _trace(D, x, y):
-    ''' Backtrace edit-distance matrix D for strings x and y '''
-    i, j = len(x), len(y)
-    while i > 0:
-        diag, vert, horz = sys.maxsize, sys.maxsize, sys.maxsize
-        delt = None
-        if i > 0 and j > 0:
-            delt = 0 if x[i-1] == y[j-1] else 1
-            diag = D[i-1, j-1] + delt
-        if i > 0:
-            vert = D[i-1, j] + 1
-        if j > 0:
-            horz = D[i, j-1] + 1
-        if diag <= vert and diag <= horz:
-            # diagonal was best
-            i -= 1; j -= 1
-        elif vert <= horz:
-            # vertical was best; this is an insertion in x w/r/t y
-            i -= 1
-        else:
-            # horizontal was best
-            j -= 1
-    # j = offset of the first (leftmost) character of t involved in the
-    # alignment
-    return j
-def _kEditDp(p, t):
-    ''' Find the alignment of p to a substring of t with the fewest edits.  
-        Return the edit distance and the coordinates of the substring. '''
-    D = numpy.zeros((len(p)+1, len(t)+1), dtype=int)
-    # Note: First row gets zeros.  First column initialized as usual.
-    D[1:, 0] = range(1, len(p)+1)
-    for i in range(1, len(p)+1):
-        for j in range(1, len(t)+1):
-            delt = 1 if p[i-1] != t[j-1] else 0
-            D[i, j] = min(D[i-1, j-1] + delt, D[i-1, j] + 1, D[i, j-1] + 1)
-    # Find minimum edit distance in last row
-    mnJ, mn = None, len(p) + len(t)
-    for j in range(len(t)+1):
-        if D[len(p), j] < mn:
-            mnJ, mn = j, D[len(p), j]
-    # Backtrace; note: stops as soon as it gets to first row
-    off = _trace(D, p, t[:mnJ])
-    # Return edit distance and t coordinates of aligned substring
-    return mn, off, mnJ
-
-# example index
-class simpleIndex:
-    def __init__(self, text, k, step):
-        self.k = k
-        self.text = text
-        self.kmers = defaultdict(list)
-        for i in range(0, len(text)-k+1, step):
-            self.kmers[text[i:i+k]].append(i)
-    def query(self, pattern, edist, step):
-        hits = []
-        for i in range(0, len(pattern)-self.k+1, step):
-            for j in self.kmers[pattern[i:i+self.k]]:
-                lf = max(0, j-i-edist)
-                rt = min(len(self.text), j-i+len(pattern)+edist)
-                mn, soff, eoff = _kEditDp(pattern, self.text[lf:rt])
-                soff += lf
-                eoff += lf
-                if mn<=edist:
-                    hits.append((mn, soff, eoff))
-        hits.sort()
-        return hits
+import time
+import argparse
+import numpy as np
 
 from Bio import SeqIO
-from sys import argv
+from array import array
+from collections import Counter
+from typing import List, Dict, Tuple
 
-seq_rec_list=[seq_record for seq_record in SeqIO.parse(argv[1], "fasta")]
-index = simpleIndex(str(seq_rec_list[0].seq), 20, 11)
-del seq_rec_list
 
-fout = open(argv[3], "w")
-reads = SeqIO.parse(argv[2], "fasta")
-for read in reads:
-    hits = index.query(str(read.seq), len(read.seq)//9, 12)
-    if hits:
-        fout.write("{}\t{}\t{}\n".format(read.id, hits[0][1], hits[0][2]))
-fout.close()
+INF = 10**9
+PARAM_K = 16
+PARAM_STEP = 30
+PARAM_MAX_ERR = 0.14
+PARAM_SLACK = 200
+PARAM_MAX_HITS = 1000
+PARAM_TOP_N = 6
+
+
+# DC3 / Karkkainen-Sanders
+def radixpass(a: array,
+              b: array,
+              r: array,
+              n: int,
+              k: int
+              ) -> None:
+    c = array("i", [0] * (k + 1))
+    for i in range(n):
+        c[r[a[i]]] += 1
+
+    sumv = 0
+    for i in range(k+1):
+        freq = c[i]
+        c[i] = sumv
+        sumv += freq
+
+    for i in range(n):
+        idx = r[a[i]]
+        b[c[idx]] = a[i]
+        c[idx] += 1
+
+
+def direct_kark_sort(s: List[str]) -> array:
+    alphabet = [None] + sorted(set(s))
+    k = len(alphabet)
+    n = len(s)
+    t = dict((c, i) for i,c in enumerate(alphabet))
+    SA = array('i', [0]*(n+3))
+    kark_sort(array('i', [t[c] for c in s]+[0]*3), SA, n, k)
+    return SA[:n]
+
+
+def kark_sort(s: array,
+              suffix_array: array,
+              n: int,
+              k: int
+              ) -> None:
+    n0  = (n + 2) // 3
+    n1  = (n + 1) // 3
+    n2  = n // 3
+    n02 = n0 + n2
+    S_a12 = array('i', [0] * (n02 + 3))
+    S_a0  = array('i', [0] * n0)
+    s12 = [i for i in range(n + (n0 - n1)) if i % 3]
+    s12.extend([0]*3)
+    s12 = array('i', s12)
+    radixpass(s12, S_a12, s[2:], n02, k)
+    radixpass(S_a12, s12, s[1:], n02, k)
+    radixpass(s12, S_a12, s, n02, k)
+    name = 0
+    c0 = c1 = c2 = -1
+    for i in range(n02):
+        pos = S_a12[i]
+        if s[pos] != c0 or s[pos + 1] != c1 or s[pos + 2] != c2:
+            name += 1
+            c0 = s[pos]
+            c1 = s[pos + 1]
+            c2 = s[pos + 2]
+        if pos % 3 == 1:
+            s12[pos // 3] = name
+        else:
+            s12[pos // 3 + n0] = name
+
+    if name < n02:
+        kark_sort(s12, S_a12, n02, name + 1)
+        for i in range(n02):
+            s12[S_a12[i]] = i + 1
+    else:
+        for i in range(n02):
+            S_a12[s12[i] - 1] = i
+
+    s0 = array('i', [S_a12[i] * 3 for i in range(n02) if S_a12[i] < n0])
+    radixpass(s0, S_a0, s, n0, k)
+    p = j = k = 0
+    t = n0 - n1
+    while k < n:
+        if t < n02:
+            if S_a12[t] < n0:
+                i = S_a12[t] * 3 + 1
+            else:
+                i = (S_a12[t] - n0) * 3 + 2
+        else:
+            i = -1
+        j = S_a0[p] if p < n0 else -1
+
+        if i == -1:
+            suffix_array[k] = j
+            p += 1
+            k += 1
+            continue
+        if j == -1:
+            suffix_array[k] = i
+            t += 1
+            k += 1
+            continue
+
+        if S_a12[t] < n0:
+            a1 = s[i]
+            b1 = s[j]
+            if a1 != b1:
+                take_i = a1 < b1
+            else:
+                ri = s12[S_a12[t] + n0]
+                rj = s12[j // 3]
+                take_i = ri <= rj
+        else:
+            a1 = s[i]
+            a2 = s[i+1]
+            b1 = s[j]
+            b2 = s[j+1]
+            if a1 != b1:
+                take_i = a1 < b1
+            elif a2 != b2:
+                take_i = a2 < b2
+            else:
+                ri = s12[S_a12[t] - n0 + 1]
+                rj = s12[j // 3 + n0]
+                take_i = ri <= rj
+
+        if take_i:
+            suffix_array[k] = i
+            t += 1
+        else:
+            suffix_array[k] = j
+            p += 1
+
+        k += 1
+
+
+def build_SA_from_string(s: List[str]) -> List[int]:
+    return list(direct_kark_sort(s))
+
+
+def read_fasta_concat(path: str) -> str:
+    recs = list(SeqIO.parse(path, "fasta"))
+    if not recs:
+        return ""
+
+    seq = str(recs[0].seq)
+    for r in recs[1:]:
+        seq += "N" + str(r.seq)
+
+    return seq
+
+
+def read_reads(path: str) -> List[Tuple[str, str]]:
+    recs = list(SeqIO.parse(path, "fasta"))
+    return [(r.id, str(r.seq)) for r in recs]  # assume uppercase
+
+
+def build_fm_index(reference: str) -> Dict:
+    if '$' in reference:
+        raise ValueError("Reference contains $ character, which is reserved for FM-index.")
+
+    text = reference + "$"
+    suffix_array = build_SA_from_string(list(text))
+    n = len(text)
+    sa = np.array(suffix_array, dtype=np.int32)
+    alphabet = sorted(set(text))
+    if alphabet[0] != '$':
+        alphabet.remove('$')
+        alphabet = ['$'] + alphabet
+
+    char_to_idx = {c:i for i,c in enumerate(alphabet)}
+    sigma = len(alphabet)
+    text_int = np.fromiter((char_to_idx[c] for c in text), dtype=np.int32, count=n)
+    sa_minus_1 = sa - 1
+    sa_minus_1[sa_minus_1 < 0] = n - 1
+    bwt = text_int[sa_minus_1]
+    counts = np.bincount(text_int, minlength=sigma)
+    Cvals = np.zeros(sigma, dtype=np.int32)
+    Cvals[1:] = np.cumsum(counts)[:-1]
+    C = {c: int(Cvals[char_to_idx[c]]) for c in alphabet}
+    occ = np.zeros((sigma, n + 1), dtype=np.int32)
+    for c_idx in range(sigma):
+        mask = (bwt == c_idx).astype(np.int32)
+        occ[c_idx, 1:] = np.cumsum(mask)
+
+    fm = {
+        'text': text,
+        'n': n,
+        'sa': sa,
+        'bwt': bwt,
+        'alphabet': alphabet,
+        'char_to_idx': char_to_idx,
+        'C': C,
+        'occ': occ
+    }
+    return fm
+
+
+# Backward search for uknown pattern
+def bw_backward_search(fm, pattern):
+    sp, ep = 0, fm['n']
+    occ = fm['occ']
+    char_to_idx = fm['char_to_idx']
+    Cmap = fm['C']
+    for ch in reversed(pattern):
+        idx = char_to_idx[ch]
+        cval = Cmap[ch]
+        sp = cval + int(occ[idx, sp])
+        ep = cval + int(occ[idx, ep])
+        if sp >= ep:
+            return 0, 0
+
+    return sp, ep
+
+
+# Seeding & candidates
+def generate_seeds(read: str,
+                   k: int = 17,
+                   step: int = 50
+                   ) -> List[Tuple[int, str]]:
+    L = len(read)
+    if L < k:
+        return []
+
+    seeds = []
+    i = 0
+    while i + k <= L:
+        seeds.append((i, read[i:i + k]))
+        i += step
+
+    if seeds and seeds[-1][0] + k < L:
+        pos = max(0, L - k)
+        seeds.append((pos, read[pos:pos + k]))
+
+    return seeds
+
+
+def gather_candidates(fm: Dict,
+                      read: str,
+                      k: int = 17,
+                      step: int = 50,
+                      max_pos_per_seed: int = 1000,
+                      top_n: int = 6
+                      ) -> List[Tuple[int, int, List[int]]]:
+    seeds = generate_seeds(read, k=k, step=step)
+    if not seeds:
+        return []
+
+    offset_counts = Counter()
+    occ_lists = {}
+    sa = fm['sa']
+    for pos, seed in seeds:
+        sp, ep = bw_backward_search(fm, seed)
+        if sp >= ep:
+            continue
+
+        sa_slice = sa[sp:ep]
+        if sa_slice.size > max_pos_per_seed:
+            sa_slice = sa_slice[:max_pos_per_seed]
+
+        for sa_pos in sa_slice:
+            sa_pos = int(sa_pos)
+            if sa_pos >= fm['n'] - 1:
+                continue
+
+            offset = sa_pos - pos
+            offset_counts[offset] += 1
+            if offset not in occ_lists:
+                occ_lists[offset] = []
+
+            occ_lists[offset].append(sa_pos)
+    if not offset_counts:
+        return []
+
+    candidates = []
+    for off, cnt in offset_counts.most_common(top_n):
+        candidates.append((off, cnt, occ_lists.get(off, [])[:200]))
+
+    return candidates
+
+
+def banded_align(read: str,
+                 ref_region: str,
+                 region_start: int,
+                 max_errors: int
+                 ) -> Tuple[int, int, int]:
+    m = len(read); n = len(ref_region)
+    if n == 0:
+        return (m + 1, region_start, region_start - 1)
+
+    band = max(10, max_errors * 2 + 5)
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [INF] * (n + 1)
+        ch = read[i - 1]
+        j0 = max(1, i - band)
+        j1 = min(n, i + band)
+        curr[0] = i
+        prev_loc = prev
+        curr_loc = curr
+        ref_loc = ref_region
+        for j in range(j0, j1 + 1):
+            cost_sub = 0 if ch == ref_loc[j - 1] else 1
+            v_diag = prev_loc[j - 1] + cost_sub
+            v_up = prev_loc[j] + 1
+            v_left = curr_loc[j - 1] + 1
+            best = v_diag
+            if v_up < best:
+                best = v_up
+            if v_left < best:
+                best = v_left
+
+            curr_loc[j] = best
+        prev = curr_loc
+        if min(prev) > max_errors:
+            return (min(prev), region_start, region_start + n - 1)
+
+    best_cost = min(prev)
+    best_j = prev.index(best_cost)
+    start_j = max(0, best_j - m - 5)
+    sub_ref = ref_region[start_j:best_j]
+    sub_n = len(sub_ref)
+    # full DP on small window to get start
+    dp = [[0] * (sub_n + 1) for _ in range(m + 1)]
+    tb = [[0] * (sub_n + 1) for _ in range(m + 1)]
+    for j in range(1, sub_n + 1):
+        dp[0][j] = 0
+    for i in range(1, m + 1):
+        dp[i][0] = i
+
+    for i in range(1, m + 1):
+        ri = read[i - 1]
+        row = dp[i]; prev_row = dp[i - 1]
+        for j in range(1, sub_n + 1):
+            cost_sub = 0 if ri == sub_ref[j - 1] else 1
+            v_diag = prev_row[j-1] + cost_sub
+            v_up = prev_row[j] + 1
+            v_left = row[j-1] + 1
+            best = v_diag
+            dir = 0
+            if v_up < best:
+                best = v_up
+                dir = 1
+            if v_left < best:
+                best = v_left
+                dir = 2
+
+            row[j] = best
+            tb[i][j] = dir
+    i = m
+    j = sub_n
+    while i > 0:
+        dir = tb[i][j]
+        if dir == 0:
+            i -= 1
+            j -= 1
+        elif dir == 1:
+            i -= 1
+        else:
+            j -= 1
+
+    start_in_sub = j
+    start_ref = region_start + start_j + start_in_sub
+    end_ref = region_start + best_j - 1
+    return (best_cost, start_ref, end_ref)
+
+
+# Mapping (forward-only, no N-checks)
+def map_reads(fm: Dict,
+              reads: List[Tuple[str, str]],
+              params: Dict
+              ) -> List[Tuple[str, int, int]]:
+    results = []
+    ref_len = fm['n'] - 1
+    k = params['k']
+    step = params['step']
+    slack = params['slack']
+    max_seed_hits = params['max_seed_hits']
+    error_rate = params['error_rate']
+    for rid, seq in reads:
+        s = seq
+        best_hit = None
+        best_cost = INF
+        candidates = gather_candidates(fm, s, k=k, step=step, max_pos_per_seed=max_seed_hits, top_n=params['top_n'])
+        if not candidates:
+            candidates = gather_candidates(fm, s, k=k, step=max(5, k // 2), max_pos_per_seed=max_seed_hits, top_n=params['top_n'])
+        if not candidates:
+            continue
+
+        max_err = max(5, int(error_rate * len(s)))
+        for off, _, _ in candidates:
+            region_start = max(0, off - slack)
+            region_end = min(ref_len, off + len(s) + slack)
+            if region_start >= region_end:
+                continue
+            ref_region = fm['text'][region_start:region_end]
+            cost, st, en = banded_align(s, ref_region, region_start, max_err)
+            if cost < best_cost:
+                best_cost = cost
+                best_hit = (rid, st, en, cost)
+
+        if best_hit is not None and best_cost <= int(error_rate * len(s)):
+            rid_out = best_hit[0]
+            start1 = best_hit[1] + 1
+            end1 = best_hit[2] + 1
+            results.append((rid_out, start1, end1))
+
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(description="FM-index mapper (forward-only, uppercase only).")
+    parser.add_argument("reference", help="Reference FASTA")
+    parser.add_argument("reads", help="Reads FASTA")
+    parser.add_argument("output", help="Output file")
+    args = parser.parse_args()
+
+    ref_seq = read_fasta_concat(args.reference)
+    if not ref_seq:
+        print("Empty reference!")
+        sys.exit(1)
+
+    fm = build_fm_index(ref_seq)
+    reads = read_reads(args.reads)
+    params = {
+        'k': PARAM_K,
+        'step': PARAM_STEP,
+        'slack': PARAM_SLACK,
+        'max_seed_hits': PARAM_MAX_HITS,
+        'error_rate': PARAM_MAX_ERR,
+        'top_n': PARAM_TOP_N
+    }
+    mapped = map_reads(fm, reads, params)
+    with open(args.output, "w") as out:
+        for rid, s, e in mapped:
+            out.write(f"{rid}\t{s}\t{e}\n")
+
+if __name__ == "__main__":
+    main()
