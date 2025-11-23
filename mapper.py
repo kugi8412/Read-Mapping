@@ -13,11 +13,11 @@ from typing import List, Dict, Tuple
 
 INF = 10**9
 PARAM_K = 15
-PARAM_STEP = 27
+PARAM_STEP = 29
+PARAM_TOP_N = 5
+PARAM_SLACK = 100
 PARAM_MAX_ERR = 0.12
-PARAM_SLACK = 125
-PARAM_MAX_HITS = 1250
-PARAM_TOP_N = 4
+PARAM_MAX_HITS = 800
 
 
 # DC3 / Karkkainen-Sanders
@@ -27,7 +27,7 @@ def radixpass(a: array,
               n: int,
               k: int
               ) -> None:
-    c = array("i", [0] * (k + 1))
+    c = array('i', [0] * (k + 1))
     for i in range(n):
         c[r[a[i]]] += 1
 
@@ -449,6 +449,7 @@ def main():
         'error_rate': PARAM_MAX_ERR,
         'top_n': PARAM_TOP_N
     }
+
     mapped = map_reads(fm, reads, params)
     with open(args.output, "w") as out:
         for rid, s, e in mapped:
