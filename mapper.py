@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import sys
-import time
 import argparse
 import numpy as np
 
@@ -13,12 +12,12 @@ from typing import List, Dict, Tuple
 
 
 INF = 10**9
-PARAM_K = 16
-PARAM_STEP = 30
-PARAM_MAX_ERR = 0.14
-PARAM_SLACK = 200
-PARAM_MAX_HITS = 1000
-PARAM_TOP_N = 6
+PARAM_K = 15
+PARAM_STEP = 27
+PARAM_MAX_ERR = 0.12
+PARAM_SLACK = 125
+PARAM_MAX_HITS = 1250
+PARAM_TOP_N = 4
 
 
 # DC3 / Karkkainen-Sanders
@@ -34,14 +33,12 @@ def radixpass(a: array,
 
     sumv = 0
     for i in range(k+1):
-        freq = c[i]
-        c[i] = sumv
+        freq, c[i] = c[i], sumv
         sumv += freq
 
     for i in range(n):
-        idx = r[a[i]]
-        b[c[idx]] = a[i]
-        c[idx] += 1
+        b[c[r[a[i]]]] = a[i]
+        c[r[a[i]]] += 1
 
 
 def direct_kark_sort(s: List[str]) -> array:
@@ -49,8 +46,8 @@ def direct_kark_sort(s: List[str]) -> array:
     k = len(alphabet)
     n = len(s)
     t = dict((c, i) for i,c in enumerate(alphabet))
-    SA = array('i', [0]*(n+3))
-    kark_sort(array('i', [t[c] for c in s]+[0]*3), SA, n, k)
+    SA = array('i', [0] * (n + 3))
+    kark_sort(array('i', [t[c] for c in s] + [0] * 3), SA, n, k)
     return SA[:n]
 
 
@@ -63,14 +60,18 @@ def kark_sort(s: array,
     n1  = (n + 1) // 3
     n2  = n // 3
     n02 = n0 + n2
+
     S_a12 = array('i', [0] * (n02 + 3))
     S_a0  = array('i', [0] * n0)
+
     s12 = [i for i in range(n + (n0 - n1)) if i % 3]
     s12.extend([0]*3)
     s12 = array('i', s12)
+
     radixpass(s12, S_a12, s[2:], n02, k)
     radixpass(S_a12, s12, s[1:], n02, k)
     radixpass(s12, S_a12, s, n02, k)
+
     name = 0
     c0 = c1 = c2 = -1
     for i in range(n02):
@@ -95,6 +96,7 @@ def kark_sort(s: array,
 
     s0 = array('i', [S_a12[i] * 3 for i in range(n02) if S_a12[i] < n0])
     radixpass(s0, S_a0, s, n0, k)
+
     p = j = k = 0
     t = n0 - n1
     while k < n:

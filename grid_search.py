@@ -1,17 +1,16 @@
-#!/usr/bin/env python3
 # grid_search.py
-# Run parameter grid for mapper.py and record time + accuracy to CSV after each iteration.
+# -*- coding: utf-8 -*-
 
-import csv
-import itertools
 import os
+import csv
 import time
 import argparse
+import itertools
+
 from typing import Dict, List, Tuple
 
-# Import functions from your mapper and utils modules (they must be in same folder or in PYTHONPATH)
-import mapper          # assumes mapper.py defines build_fm_index, map_reads, read_reads
-import utils           # assumes utils.py defines mapped_reads_and_acc
+import utils
+import mapper
 
 INF = 10**9
 PARAM_K = 16
@@ -28,12 +27,10 @@ def run_single_setting(fm: Dict,
                        out_dir: str,
                        iter_id: int
                        ) -> Tuple[str, float]:
-    """
-    Run mapping for one parameter setting.
+    """ Run mapping for one parameter setting.
     Returns tuple (output_file_path, elapsed_seconds)
     """
     start = time.perf_counter()
-    # run mapper.map_reads (returns list of tuples (id, start1, end1))
     mapped = mapper.map_reads(fm, reads, params)
     elapsed = time.perf_counter() - start
 

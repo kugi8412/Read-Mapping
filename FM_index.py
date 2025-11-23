@@ -1,9 +1,12 @@
 # mapper.py
 # -*- coding: utf-8 -*-
 
+import os
 import sys
 import time
+import psutil
 import argparse
+
 import numpy as np
 
 from Bio import SeqIO
@@ -13,12 +16,52 @@ from typing import List, Dict, Tuple
 
 
 INF = 10**9
-PARAM_K = 16
-PARAM_STEP = 30
-PARAM_MAX_ERR = 0.14
-PARAM_SLACK = 200
-PARAM_MAX_HITS = 1000
-PARAM_TOP_N = 6
+PARAM_K = 15
+PARAM_STEP = 26
+PARAM_MAX_ERR = 0.13
+PARAM_SLACK = 120
+PARAM_MAX_HITS = 1200
+PARAM_TOP_N = 4
+
+
+def get_rss_bytes() -> int:
+    """ Zwraca aktualne zużycie pamięci RSS w bajtach.
+    """
+    p = psutil.Process(os.getpid())
+    rss = int(p.memory_info().rss)
+    return rss
+
+
+def human_bytes(n: int) -> str:
+    """ Konwertuje liczbę bajtów na czytelny
+    format (KB, MB, GB, ...).
+    """
+    if n < 1024:
+        return f"{n} B"
+    for unit in ("KB", "MB", "GB", "TB"):
+        n /= 1024.0
+        if n < 1024.0:
+            return f"{n:3.2f} {unit}"
+
+    return f"{n:.2f} PB"
+
+
+def check_memory_and_report(label: str,
+                            mem_limit_bytes: int = None,
+                            fail_on_exceed: bool = False
+                            ) -> bool:
+    rss = get_rss_bytes()
+    print(f"[MEM] {label}: RSS = {human_bytes(rss)} ({rss} bytes)")
+    if mem_limit_bytes is not None:
+        if rss > mem_limit_bytes:
+            print(f"[MEM][WARNING] Memory limit exceeded: {human_bytes(rss)} > {human_bytes(mem_limit_bytes)}")
+            if fail_on_exceed:
+                print("[MEM][ERROR] Exiting because --fail-on-memory flag set.")
+                sys.exit(2)
+
+            return False
+
+    return True
 
 
 # DC3 / Karkkainen-Sanders
@@ -207,7 +250,6 @@ def build_fm_index(reference: str) -> Dict:
 
     fm = {
         'text': text,
-        # 'text_int': text_int,
         'n': n,
         'sa': sa,
         'bwt': bwt,
@@ -301,102 +343,6 @@ def gather_candidates(fm: Dict,
 
     return candidates
 
-
-# Banded edit distances alignment
-def banded_align_np(read: str,
-                  ref_region_int: np.ndarray,
-                  region_start: int,
-                  max_errors: int,
-                  char_to_idx: Dict[str, int]
-                  ) -> Tuple[int, int, int]:
-    m = len(read)
-    n = ref_region_int.size
-    if n == 0:
-        return (m + 1, region_start, region_start - 1)
-
-    band = max(10, max_errors * 2 + 5)
-    # read -> int array
-    p_int = np.fromiter((char_to_idx[c] for c in read), dtype=np.int32, count=m)
-    prev = np.zeros(n + 1, dtype=np.int32)
-    for i in range(1, m + 1):
-        curr = np.full(n + 1, INF, dtype=np.int32)
-        ch_idx = p_int[i - 1]
-        j0 = max(1, i - band)
-        j1 = min(n, i + band)
-        curr[0] = i
-        ref_slice = ref_region_int[j0 - 1:j1] # length = j1 - (j0-1)
-        cost_sub = (ref_slice != ch_idx).astype(np.int32)
-        diag = prev[j0 - 1:j1] + cost_sub
-        up = prev[j0:j1 + 1] + 1
-        left = np.empty_like(diag)
-        prev_left = curr[j0 - 1]  # initial
-        left_list = []
-        for val in range(j0, j1 + 1):
-            left_val = prev_left + 1
-            left_list.append(left_val)
-            prev_left = left_val
-
-        left = np.fromiter(left_list, dtype=np.int32)
-        seg = np.minimum(np.minimum(diag, up), left)
-        curr[j0:j1 + 1] = seg
-        prev = curr
-
-        # quick prune: if best in prev > max_errors -> abort
-        if prev.min() > max_errors:
-            return (int(prev.min()), region_start, region_start + n - 1)
-
-    best_cost = int(prev.min())
-    best_j = int(prev.argmin())  # column index where alignment ends
-    start_j = max(0, best_j - m - 5)
-    sub_ref_int = ref_region_int[start_j:best_j]
-    sub_n = sub_ref_int.size
-    sub_ref_list = [None] * sub_n
-    for i in range(sub_n):
-        sub_ref_list[i] = int(sub_ref_int[i])
-
-    p_list = [int(x) for x in p_int]
-    dp = [[0] * (sub_n + 1) for _ in range(m + 1)]
-    tb = [[0] * (sub_n + 1) for _ in range(m + 1)]
-    for j in range(1, sub_n + 1):
-        dp[0][j] = 0
-
-    for i in range(1, m + 1):
-        dp[i][0] = i
-
-    for i in range(1, m + 1):
-        ri = p_list[i - 1]
-        row = dp[i]; prev_row = dp[i - 1]
-        for j in range(1, sub_n + 1):
-            cost_sub = 0 if ri == sub_ref_list[j - 1] else 1
-            v_diag = prev_row[j - 1] + cost_sub
-            v_up = prev_row[j] + 1
-            v_left = row[j - 1] + 1
-            best = v_diag; dir = 0
-            if v_up < best:
-                best = v_up; dir = 1
-            if v_left < best:
-                best = v_left; dir = 2
-            row[j] = best
-            tb[i][j] = dir
-
-    # traceback to get start_in_sub
-    i = m; j = sub_n
-    while i > 0:
-        dir = tb[i][j]
-        if dir == 0:
-            i -= 1
-            j -= 1
-        elif dir == 1:
-            i -= 1
-        else:
-            j -= 1
-
-    start_in_sub = j
-    start_ref = region_start + start_j + start_in_sub
-    end_ref = region_start + best_j - 1
-    return (best_cost, start_ref, end_ref)
-
-
 def banded_align(read: str,
                  ref_region: str,
                  region_start: int,
@@ -438,6 +384,7 @@ def banded_align(read: str,
     start_j = max(0, best_j - m - 5)
     sub_ref = ref_region[start_j:best_j]
     sub_n = len(sub_ref)
+
     # full DP on small window to get start
     dp = [[0] * (sub_n + 1) for _ in range(m + 1)]
     tb = [[0] * (sub_n + 1) for _ in range(m + 1)]
@@ -482,7 +429,6 @@ def banded_align(read: str,
     end_ref = region_start + best_j - 1
     return (best_cost, start_ref, end_ref)
 
-
 # Mapping (forward-only, no N-checks)
 def map_reads(fm: Dict,
               reads: List[Tuple[str, str]],
@@ -512,7 +458,6 @@ def map_reads(fm: Dict,
             if region_start >= region_end:
                 continue
             ref_region = fm['text'][region_start:region_end]
-            # ref_region_int = fm['text_int'][region_start:region_end]
             cost, st, en = banded_align(s, ref_region, region_start, max_err)
             if cost < best_cost:
                 best_cost = cost
@@ -528,11 +473,32 @@ def map_reads(fm: Dict,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FM-index mapper (forward-only, uppercase only).")
+    parser = argparse.ArgumentParser(description="FM-index mapper (forward-only, uppercase only) with memory checks.")
     parser.add_argument("reference", help="Reference FASTA")
     parser.add_argument("reads", help="Reads FASTA")
     parser.add_argument("output", help="Output file")
+    parser.add_argument("--k", type=int, default=PARAM_K, help="Seed k-mer length")
+    parser.add_argument("--step", type=int, default=PARAM_STEP, help="Seed step")
+    parser.add_argument("--slack", type=int, default=PARAM_SLACK, help="Slack around candidate (nt)")
+    parser.add_argument("--max_seed_hits", type=int, default=PARAM_MAX_HITS, help="Max occurrences per seed considered")
+    parser.add_argument("--error_rate", type=float, default=PARAM_MAX_ERR, help="Allowed error rate per read")
+    parser.add_argument("--top_n", type=int, default=PARAM_TOP_N, help="Top candidate offsets to try")
+    parser.add_argument("--mem-limit", type=str, default="1GB", help="Memory limit to check (e.g. '1GB' or '800MB')")
+    parser.add_argument("--fail-on-memory", action='store_true', help="Exit with error if memory limit exceeded")
     args = parser.parse_args()
+
+    # parse memory limit
+    def parse_mem(s: str) -> int:
+        s = s.strip().upper()
+        if s.endswith("GB"):
+            return int(float(s[:-2]) * 1024**3)
+        if s.endswith("MB"):
+            return int(float(s[:-2]) * 1024**2)
+        if s.endswith("KB"):
+            return int(float(s[:-2]) * 1024)
+        return int(s)
+
+    mem_limit_bytes = parse_mem(args.mem_limit)
 
     t0 = time.time()
     print("Reading reference...")
@@ -541,21 +507,32 @@ def main():
         print("Empty reference!")
         sys.exit(1)
 
-    print(f"Reference length: {len(ref_seq)}")
-    print("Building FM-index (SA via DC3)...")
-    fm = build_fm_index(ref_seq)
-    print(f"FM-index built. n={fm['n']}. Time: {time.time()-t0:.1f}s")
+    check_memory_and_report("After reading reference", mem_limit_bytes, args.fail_on_memory)
 
-    print("Reading reads...")
+    print(f"Reference length: {len(ref_seq)}")
+    print("Building FM-index")
+
+    t_build_start = time.time()
+    fm = build_fm_index(ref_seq)
+    t_build = time.time() - t_build_start
+
+    print(f"FM-index built. n={fm['n']}. Time: {t_build:.1f}s")
+
+    check_memory_and_report("After building FM-index", mem_limit_bytes, args.fail_on_memory)
+
+    print("Reading reads")
     reads = read_reads(args.reads)
     print(f"Reads count: {len(reads)}")
+
+    check_memory_and_report("After reading reads", mem_limit_bytes, args.fail_on_memory)
+
     params = {
-        'k': PARAM_K,
-        'step': PARAM_STEP,
-        'slack': PARAM_SLACK,
-        'max_seed_hits': PARAM_MAX_HITS,
-        'error_rate': PARAM_MAX_ERR,
-        'top_n': PARAM_TOP_N
+        'k': args.k,
+        'step': args.step,
+        'slack': args.slack,
+        'max_seed_hits': args.max_seed_hits,
+        'error_rate': args.error_rate,
+        'top_n': args.top_n
     }
 
     t1 = time.time()
@@ -563,11 +540,14 @@ def main():
     tmap = time.time() - t1
     print(f"Mapping finished in {tmap:.1f}s; mapped {len(mapped)} reads.")
 
+    check_memory_and_report("after mapping", mem_limit_bytes, args.fail_on_memory)
+
     with open(args.output, "w") as out:
         for rid, s, e in mapped:
             out.write(f"{rid}\t{s}\t{e}\n")
 
-    print("Total time: {:.1f}s".format(time.time() - t0))
+    print("Total time: {:.2f}s".format(time.time() - t0))
+
 
 if __name__ == "__main__":
     main()
