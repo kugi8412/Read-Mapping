@@ -20,6 +20,7 @@ PARAM_SLACK = 200
 PARAM_MAX_HITS = 1000
 PARAM_TOP_N = 6
 
+
 def run_single_setting(fm: Dict,
                        reads: List[Tuple[str, str]],
                        params: Dict,
@@ -72,8 +73,6 @@ def grid_search(reference: str,
     t_build = time.perf_counter() - t0
     print(f"Built FM-index in {t_build:.2f}s (n={fm['n']})")
 
-    # If utils.mapped_reads_and_acc expects test_file with same ids as output, pass truth_file
-    # Iterate grid
     combos = list(itertools.product(*[grid_params[k] for k in sorted(grid_params.keys())]))
     param_keys = sorted(grid_params.keys())
     print(f"Total combinations: {len(combos)}")
@@ -81,17 +80,13 @@ def grid_search(reference: str,
     iter_id = 0
     for combo in combos:
         iter_id += 1
-        # construct params dict from base_params and combo
         params = base_params.copy()
         params.update({k: v for k, v in zip(param_keys, combo)})
-
         print(f"[{iter_id}/{len(combos)}] Running params: {params}")
-
         try:
             out_file, elapsed = run_single_setting(fm, reads, params, out_prefix="mapping", out_dir=out_dir, iter_id=iter_id)
         except Exception as e:
             print(f"ERROR on iteration {iter_id} with params {params}: {e}")
-            # still write a row with error
             row = {
                 'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
                 'iter_id': iter_id,
@@ -109,7 +104,6 @@ def grid_search(reference: str,
             append_to_csv(results_csv, row)
             continue
 
-        # compute mapped fraction and accuracy using utils.mapped_reads_and_acc
         try:
             mapped_frac, acc = utils.mapped_reads_and_acc(out_file, truth_file)
         except Exception as e:
@@ -144,17 +138,14 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-
-    # NOTE: mapper.build_fm_index expects a reference string (sequence content).
-    # We reuse the helper read_fasta_concat from mapper to read and concat reference FASTA
     reference_seq = mapper.read_fasta_concat(args.reference)
 
-    # example grid - modify to taste
+    # example grid parameters
     grid_params = {
         'k': [15, 16, 18],                     # k-mer sizes
         'step': [26, 30, 34],                  # seed step
-        'slack': [100, 200, 300],                   # slack around candidate
-        'max_seed_hits': [800, 1000, 1200],          # limit seed occurrences
+        'slack': [100, 200, 300],              # slack around candidate
+        'max_seed_hits': [800, 1000, 1200],    # limit seed occurrences
         'error_rate': [0.12, 0.15],            # allowed error rate
         'top_n': [5, 6]                        # number of top offsets to try
     }
@@ -168,5 +159,4 @@ if __name__ == "__main__":
         'top_n': PARAM_TOP_N
     }
 
-    # run grid
     grid_search(reference_seq, args.reads, args.truth, args.out_dir, args.results_csv, grid_params, base_params)
