@@ -1,4 +1,4 @@
-# mapper.py
+# mapper_memory_plot.py
 # -*- coding: utf-8 -*-
 
 import os
@@ -10,8 +10,12 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import gc
+import time
+import psutil
 import argparse
+import threading
 import numpy as np
+import matplotlib.pyplot as plt
 
 from Bio import SeqIO
 from collections import Counter
@@ -26,6 +30,50 @@ PARAM_SLACK = 100
 PARAM_MAX_ERR = 0.12
 PARAM_MAX_HITS = 800
 CP_INTERVAL = 128
+
+
+# Memory Monitor
+class MemoryMonitor(threading.Thread):
+    def __init__(self, interval=0.05):
+        super().__init__()
+        self.interval = interval
+        self.stop_event = threading.Event()
+        self.history = []
+        self.start_time = time.time()
+        self.peak = 0
+        self.daemon = True
+
+    def run(self):
+        p = psutil.Process(os.getpid())
+        while not self.stop_event.is_set():
+            try:
+                rss = p.memory_info().rss
+                if rss > self.peak:
+                    self.peak = rss
+                self.history.append((time.time() - self.start_time, rss))
+            except:
+                break
+            time.sleep(self.interval)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def plot(self, path="Memory_usage.png"):
+        if not self.history:
+            return
+        t, m = zip(*self.history)
+        m_mb = [x / (1024 ** 2) for x in m]
+        plt.figure(figsize=(10, 4))
+        plt.plot(t, m_mb, label='RSS Usage', color='darkblue')
+        plt.fill_between(t, m_mb, color='darkblue', alpha=0.1)
+        plt.xlabel("Time [s]")
+        plt.ylabel("RSS [MB]")
+        plt.title(f"Memory Usage (Peak: {self.peak / 1024**2:.2f} MB)")
+        plt.grid(True, linestyle='--')
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close()
+        print(f"[MONITOR] Plot saved to {path}")
 
 
 # Suffix Array
@@ -81,6 +129,7 @@ def build_fm_index(reference: str) -> Dict:
     gc.collect()
     
     n = len(text_bytes)
+    print("  -> Building Suffix Array...")
     sa = build_sa_numpy(text_bytes)
     alphabet = sorted(list(set(text_bytes)))
     char_to_idx = {c: i for i, c in enumerate(alphabet)}
@@ -89,6 +138,7 @@ def build_fm_index(reference: str) -> Dict:
     for char_code, idx in char_to_idx.items():
         trans_table[char_code] = idx
 
+    print("  -> Converting text...")
     raw_np = np.frombuffer(text_bytes, dtype=np.uint8)
     text_int = trans_table[raw_np]
     sa_minus_1 = sa - 1
@@ -98,7 +148,8 @@ def build_fm_index(reference: str) -> Dict:
     Cvals = np.zeros(sigma, dtype=np.int32)
     Cvals[1:] = np.cumsum(counts)[:-1]
     C = {c: int(Cvals[char_to_idx[c]]) for c in alphabet}
-
+    
+    print("  -> Building Checkpoints...")
     num_cp = (n + CP_INTERVAL) // CP_INTERVAL + 1
     occ_cp = np.zeros((sigma, num_cp), dtype=np.int32)
     running = np.zeros(sigma, dtype=np.int32)
@@ -159,7 +210,6 @@ def bw_backward_search(fm: Dict,
 
     return sp, ep
 
-
 def generate_seeds(read: str,
                    k: int,
                    step: int
@@ -178,7 +228,6 @@ def generate_seeds(read: str,
         seeds.append((pos, read[pos:pos+k]))
 
     return seeds
-
 
 def gather_candidates(fm,
                       read,
@@ -285,7 +334,10 @@ def map_reads(fm,
     results = []
     ref_len = fm['n'] - 1
     
-    for _, (rid, seq) in enumerate(reads):     
+    for i, (rid, seq) in enumerate(reads):
+        if i % 100 == 0:
+            print(f"Mapping {i}/{len(reads)}...", end='\r')
+        
         s = seq
         best_hit = None
         best_cost = INF
@@ -328,12 +380,23 @@ def main():
     parser.add_argument("output")
     args = parser.parse_args()
 
+    monitor = MemoryMonitor()
+    monitor.start()
+
     try:
+        print("Reading Reference...")
         ref_recs = list(SeqIO.parse(args.reference, 'fasta'))
         if not ref_recs: return
         ref = "".join(str(r.seq).upper() for r in ref_recs)
-        fm = build_fm_index(ref) 
+        
+        print(f"Building FM-Index (len={len(ref)})...")
+        t0 = time.time()
+        fm = build_fm_index(ref)
+        print(f"Built in {time.time()-t0:.2f}s")
+        
         reads = [(r.id, str(r.seq).upper()) for r in SeqIO.parse(args.reads, 'fasta')]
+        print(f"Loaded {len(reads)} reads.")
+        
         params = {
             'k': PARAM_K,
             'step': PARAM_STEP,
@@ -343,14 +406,18 @@ def main():
             'top_n': PARAM_TOP_N
         }
         
+        t1 = time.time()
         results = map_reads(fm, reads, params)
+        print(f"\nDone in {time.time()-t1:.2f}s. Mapped: {len(results)}")
         
         with open(args.output, 'w') as f:
             for r in results: f.write(f"{r[0]}\t{r[1]}\t{r[2]}\n")
                 
     finally:
         gc.collect()
-
+        monitor.stop()
+        monitor.join()
+        monitor.plot()
 
 if __name__ == '__main__':
     main()
